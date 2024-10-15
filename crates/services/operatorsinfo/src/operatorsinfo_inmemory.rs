@@ -21,6 +21,7 @@ use futures_util::StreamExt;
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{
+    Notify,
     mpsc::{self, UnboundedSender},
     oneshot::{self, Sender},
     RwLock,
@@ -38,6 +39,7 @@ pub struct OperatorInfoServiceInMemory {
     pub avs_registry_reader: AvsRegistryChainReader,
     ws: String,
     pub_keys: UnboundedSender<OperatorsInfoMessage>,
+    pub past_querying_finished: Arc<Notify>
 }
 
 /// State of the operator info service.
@@ -140,12 +142,14 @@ impl OperatorInfoServiceInMemory {
                 }
             }
         });
+        let past_querying_finished = Arc::new(Notify::new());
 
         Self {
             logger,
             avs_registry_reader: avs_registry_chain_reader,
             ws: web_socket,
             pub_keys: pubkeys_tx,
+            past_querying_finished
         }
     }
 
@@ -170,6 +174,7 @@ impl OperatorInfoServiceInMemory {
         self.query_past_registered_operator_events_and_fill_db(start_block, end_block)
             .await
             .unwrap();
+        self.past_querying_finished.notify_one();
         let provider = get_ws_provider(&self.ws).await.unwrap();
         let current_block_number = provider.get_block_number().await.unwrap();
 
