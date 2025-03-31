@@ -24,6 +24,7 @@ use futures_util::StreamExt;
 use std::{collections::HashMap, sync::Arc};
 use thiserror::Error;
 use tokio::sync::{
+    Notify,
     mpsc::{self, UnboundedSender},
     oneshot::{self, Sender},
     RwLock,
@@ -41,6 +42,7 @@ pub struct OperatorInfoServiceInMemory {
     pub avs_registry_reader: AvsRegistryChainReader,
     ws: String,
     pub_keys: UnboundedSender<OperatorsInfoMessage>,
+    past_querying_finished: Arc<Notify>
 }
 
 /// Source of the operator info.
@@ -244,13 +246,14 @@ impl OperatorInfoServiceInMemory {
                 }
             }
         });
-
+        let past_querying_finished = Arc::new(Notify::new());
         Ok((
             Self {
                 logger,
                 avs_registry_reader: avs_registry_chain_reader,
                 ws: web_socket,
                 pub_keys: pubkeys_tx,
+                past_querying_finished
             },
             error_rx,
         ))
@@ -333,7 +336,10 @@ impl OperatorInfoServiceInMemory {
                             self.logger.error(&format!("Failed to query past registered operator events: {:?}.", err), "eigen-services-operatorsinfo.start_service");
                             return Err(err);
                         }
-                        _ => continue,
+                        _ => {
+                            self.past_querying_finished.notify_one();
+                            continue
+                        },
                     }
                 },
                 log = new_operator_registration_stream.next() => {
@@ -427,6 +433,10 @@ impl OperatorInfoServiceInMemory {
         }
 
         Ok(())
+    }
+    
+    pub async fn wait_for_operator_registration_completion(&self) {
+        self.past_querying_finished.notified().await
     }
 
     /// Queries past operator registration events and fills the database by sending messages
