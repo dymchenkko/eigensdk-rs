@@ -26,7 +26,7 @@ use thiserror::Error;
 use tokio::sync::{
     mpsc::{self, UnboundedSender},
     oneshot::{self, Sender},
-    RwLock,
+    Notify, RwLock,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -41,6 +41,7 @@ pub struct OperatorInfoServiceInMemory {
     pub avs_registry_reader: AvsRegistryChainReader,
     ws: String,
     pub_keys: UnboundedSender<OperatorsInfoMessage>,
+    past_querying_finished: Arc<Notify>,
 }
 
 /// Source of the operator info.
@@ -246,13 +247,14 @@ impl OperatorInfoServiceInMemory {
                 }
             }
         });
-
+        let past_querying_finished = Arc::new(Notify::new());
         Ok((
             Self {
                 logger,
                 avs_registry_reader: avs_registry_chain_reader,
                 ws: web_socket,
                 pub_keys: pubkeys_tx,
+                past_querying_finished,
             },
             error_rx,
         ))
@@ -281,6 +283,7 @@ impl OperatorInfoServiceInMemory {
         let ws = self.ws.clone();
         let pub_keys = self.pub_keys.clone();
         let (tx, mut rx) = mpsc::channel(1);
+        let past_querying_finished = Arc::clone(&self.past_querying_finished);
         let handle = tokio::spawn(async move {
             let res = query_past_registered_operator_events_and_fill_db(
                 logger,
@@ -291,6 +294,8 @@ impl OperatorInfoServiceInMemory {
                 pub_keys,
             )
             .await;
+
+            past_querying_finished.notify_one();
             let _ = tx.send(res).await;
         });
 
@@ -335,7 +340,9 @@ impl OperatorInfoServiceInMemory {
                             self.logger.error(&format!("Failed to query past registered operator events: {:?}.", err), "eigen-services-operatorsinfo.start_service");
                             return Err(err);
                         }
-                        _ => continue,
+                        _ => {
+                            continue
+                        },
                     }
                 },
                 log = new_operator_registration_stream.next() => {
@@ -429,6 +436,10 @@ impl OperatorInfoServiceInMemory {
         }
 
         Ok(())
+    }
+
+    pub async fn wait_for_operator_registration_completion(&self) {
+        self.past_querying_finished.notified().await
     }
 
     /// Queries past operator registration events and fills the database by sending messages
