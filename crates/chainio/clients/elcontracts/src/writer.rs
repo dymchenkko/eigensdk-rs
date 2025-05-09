@@ -764,6 +764,74 @@ impl ELChainWriter {
         Ok(*tx.tx_hash())
     }
 
+    pub async fn register_for_operator_sets_with_gas(
+        &self,
+        operator_address: Address,
+        avs_address: Address,
+        operator_set_ids: Vec<u32>,
+        bls_key_pair: BlsKeyPair,
+        socket: &str,
+        gas: u64,
+    ) -> Result<TxHash, ElContractsError> {
+        let provider = get_signer(&self.signer, &self.provider);
+        let contract_allocation_manager = AllocationManager::new(
+            self.allocation_manager
+                .ok_or(ElContractsError::MissingParameter)?,
+            provider.clone(),
+        );
+        let contract_registry_coordinator =
+            RegistryCoordinator::new(self.registry_coordinator, provider);
+
+        let g1_hashed_msg_to_sign = contract_registry_coordinator
+            .pubkeyRegistrationMessageHash(operator_address)
+            .call()
+            .await?
+            ._0;
+
+        let sig = bls_key_pair
+            .sign_hashed_to_curve_message(alloy_g1_point_to_g1_affine(g1_hashed_msg_to_sign))
+            .g1_point();
+        let alloy_g1_point_signed_msg =
+            convert_to_g1_point(sig.g1()).map_err(|_| ElContractsError::BLSKeyPairInvalid)?;
+        let g1_pub_key_bn254 = convert_to_g1_point(bls_key_pair.public_key().g1())
+            .map_err(|_| ElContractsError::BLSKeyPairInvalid)?;
+        let g2_pub_key_bn254 = convert_to_g2_point(bls_key_pair.public_key_g2().g2())
+            .map_err(|_| ElContractsError::BLSKeyPairInvalid)?;
+
+        let g2_point_x: Vec<DynSolValue> = vec![
+            DynSolValue::Uint(g2_pub_key_bn254.X[0], 256),
+            DynSolValue::Uint(g2_pub_key_bn254.X[1], 256),
+        ];
+        let g2_point_y: Vec<DynSolValue> = vec![
+            DynSolValue::Uint(g2_pub_key_bn254.Y[0], 256),
+            DynSolValue::Uint(g2_pub_key_bn254.Y[1], 256),
+        ];
+        let encoded_params_with_socket = DynSolValue::Tuple(vec![
+            DynSolValue::Uint(U256::from(0), 256),
+            DynSolValue::String(socket.to_string()),
+            DynSolValue::Uint(alloy_g1_point_signed_msg.X, 256),
+            DynSolValue::Uint(alloy_g1_point_signed_msg.Y, 256),
+            DynSolValue::Uint(g1_pub_key_bn254.X, 256),
+            DynSolValue::Uint(g1_pub_key_bn254.Y, 256),
+            DynSolValue::FixedArray(g2_point_x),
+            DynSolValue::FixedArray(g2_point_y),
+        ])
+        .abi_encode_params();
+
+        let params = IAllocationManagerTypes::RegisterParams {
+            avs: avs_address,
+            operatorSetIds: operator_set_ids,
+            data: encoded_params_with_socket.into(),
+        };
+        let tx = contract_allocation_manager
+            .registerForOperatorSets(operator_address, params)
+            .gas(gas)
+            .send()
+            .await?;
+
+        Ok(*tx.tx_hash())
+    }
+
     /// Register with churn an operator for one or more operator sets for an AVS
     /// while replacing existing operators in full quorums. If the operator
     /// has any stake allocated to these operator sets, it immediately becomes slashable.
